@@ -1666,18 +1666,8 @@ async def health_check():
 
 # ==================== STARTUP / SHUTDOWN ====================
 app.include_router(api_router)
-# CORS configuration - allow frontend and local development
-CORS_ORIGINS = os.environ.get('CORS_ORIGINS', '*')
-if CORS_ORIGINS == '*':
-    allow_origins = ['*']
-else:
-    allow_origins = CORS_ORIGINS.split(',')
-    # Always include production frontend
-    if 'https://talent-scoutfrontend-production.up.railway.app' not in allow_origins:
-        allow_origins.append('https://talent-scoutfrontend-production.up.railway.app')
-    # Always include this backend
-    if 'https://talent-scoutbackend.onrender.com' not in allow_origins:
-        allow_origins.append('https://talent-scoutbackend.onrender.com')
+# CORS configuration - allow all origins for development and production
+allow_origins = ["*"]
 
 app.add_middleware(CORSMiddleware, 
     allow_origins=allow_origins,
