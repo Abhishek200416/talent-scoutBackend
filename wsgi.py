@@ -13,3 +13,4 @@ from server import app
 # Expose the WSGI app callable for Gunicorn
 application = app
 app_instance = app
+app = app  # For gunicorn compatibility
