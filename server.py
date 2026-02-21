@@ -1661,8 +1661,21 @@ async def root():
 
 # ==================== STARTUP / SHUTDOWN ====================
 app.include_router(api_router)
-app.add_middleware(CORSMiddleware, allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','), allow_methods=["*"], allow_headers=["*"])
+# CORS configuration - allow frontend and local development
+CORS_ORIGINS = os.environ.get('CORS_ORIGINS', '*')
+if CORS_ORIGINS == '*':
+    allow_origins = ['*']
+else:
+    allow_origins = CORS_ORIGINS.split(',')
+    # Always include production frontend
+    if 'https://talent-scoutfrontend-production.up.railway.app' not in allow_origins:
+        allow_origins.append('https://talent-scoutfrontend-production.up.railway.app')
+
+app.add_middleware(CORSMiddleware, 
+    allow_origins=allow_origins,
+    allow_credentials=True,
+    allow_methods=["*"], 
+    allow_headers=["*"])
 
 if UPLOAD_DIR.exists():
     app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
