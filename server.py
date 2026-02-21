@@ -1659,6 +1659,11 @@ async def root():
     return {"message": "Talent Scout API (SQLite/PostgreSQL ORM)", "version": "3.0.0",
             "database": "SQLite" if IS_SQLITE else "PostgreSQL", "blockchain": "Ethereum Mainnet (Alchemy)"}
 
+# Health check endpoint for Render
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 # ==================== STARTUP / SHUTDOWN ====================
 app.include_router(api_router)
 # CORS configuration - allow frontend and local development
