@@ -1675,6 +1675,9 @@ else:
     # Always include production frontend
     if 'https://talent-scoutfrontend-production.up.railway.app' not in allow_origins:
         allow_origins.append('https://talent-scoutfrontend-production.up.railway.app')
+    # Always include this backend
+    if 'https://talent-scoutbackend.onrender.com' not in allow_origins:
+        allow_origins.append('https://talent-scoutbackend.onrender.com')
 
 app.add_middleware(CORSMiddleware, 
     allow_origins=allow_origins,
