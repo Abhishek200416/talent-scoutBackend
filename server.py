@@ -1667,7 +1667,14 @@ async def health_check():
 # ==================== STARTUP / SHUTDOWN ====================
 app.include_router(api_router)
 # CORS configuration - allow all origins for development and production
-allow_origins = ["*"]
+allow_origins = [
+    "https://talent-scoutfrontend-production.up.railway.app",
+    "https://talent-scoutbackend.onrender.com",
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+]
 
 app.add_middleware(CORSMiddleware, 
     allow_origins=allow_origins,
