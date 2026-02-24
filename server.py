@@ -415,6 +415,7 @@ class UserRegistration(BaseModel):
     email: EmailStr
     name: str
     role: str
+    password: str
 
 class OTPVerification(BaseModel):
     email: EmailStr
@@ -496,99 +497,146 @@ class ResetPasswordRequest(BaseModel):
     otp: str
     new_password: str
 
-# ==================== AUTH ====================
+# ==================== AUTH (NO OTP - PASSWORD ONLY) ====================
 @api_router.post("/auth/register")
 async def register(user: UserRegistration, bg: BackgroundTasks):
+    """Register user with password - No OTP required, auto-verified"""
     async with async_session() as s:
         result = await s.execute(select(User).where(User.email == user.email))
         existing = result.scalar_one_or_none()
-        otp = _otp()
-        expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        
+        # Validate password
+        if len(user.password) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        
+        password_hash = hash_password(user.password)
+        
         if existing:
-            existing.otp = otp; existing.otp_expiry = expiry
-            if user.name: existing.name = user.name
+            # Update existing user with new password and mark as verified
+            existing.password_hash = password_hash
+            existing.verified = True
+            existing.name = user.name
+            existing.role = user.role
+            existing.password_set_at = _now()
         else:
-            s.add(User(id=uuid.uuid4().hex, email=user.email, name=user.name, role=user.role, otp=otp, otp_expiry=expiry))
+            # Create new user with password, auto-verified (no OTP)
+            s.add(User(
+                id=uuid.uuid4().hex, 
+                email=user.email, 
+                name=user.name, 
+                role=user.role, 
+                password_hash=password_hash,
+                verified=True,  # Auto-verify, no OTP needed
+                password_set_at=_now()
+            ))
+        
         await s.commit()
-        bg.add_task(send_email, user.email, "Talent Scout - Your OTP Code",
-            f"""<h2 style="color:#6366f1;">Hello {user.name}!</h2>
-            <p>Your one-time verification code:</p>
-            <div style="background:linear-gradient(135deg,#6366f1,#8b5cf6);padding:30px;text-align:center;border-radius:12px;margin:20px 0;">
-                <h1 style="color:white;font-size:52px;letter-spacing:10px;margin:0;">{otp}</h1>
-            </div>
-            <p style="color:#666;">Valid for <strong>10 minutes</strong>. Do not share this with anyone.</p>""")
-        return {"message": "OTP sent to email", "email": user.email}
+        
+        # Send welcome email (optional, not OTP)
+        bg.add_task(send_email, user.email, "Welcome to Talent Scout",
+            f"""<h2 style="color:#6366f1;">Welcome {user.name}!</h2>
+            <p>Your account has been created successfully.</p>
+            <p>You can now log in with your email and password.</p>
+            <p style="color:#666;">No OTP verification required - you're all set!</p>""")
+        
+        return {
+            "message": "Account created successfully", 
+            "email": user.email,
+            "verified": True
+        }
 
 @api_router.post("/auth/verify-otp")
 async def verify_otp(v: OTPVerification):
+    """OTP verification disabled - returns success for backward compatibility"""
+    # For backward compatibility, just return success
+    # The user is already verified during registration
     async with async_session() as s:
         result = await s.execute(select(User).where(User.email == v.email))
         user = result.scalar_one_or_none()
-        if not user: raise HTTPException(404, "User not found")
-        if not user.otp: raise HTTPException(400, "Please request a new OTP")
-        if user.otp != v.otp: raise HTTPException(400, "Invalid OTP")
-        if datetime.now(timezone.utc) > datetime.fromisoformat(user.otp_expiry):
-            raise HTTPException(400, "OTP expired")
-        user.verified = True; user.otp = None
-        await s.commit()
-        return {"message": "Email verified successfully", "token": f"token_{v.email}", "role": user.role, "name": user.name}
+        if not user: 
+            raise HTTPException(404, "User not found")
+        
+        # Auto-verify if not already
+        if not user.verified:
+            user.verified = True
+            await s.commit()
+        
+        return {
+            "message": "Email verified successfully", 
+            "token": f"token_{v.email}", 
+            "role": user.role, 
+            "name": user.name,
+            "verified": True
+        }
 
 @api_router.post("/auth/resend-otp")
 async def resend_otp(data: dict = Body(...), bg: BackgroundTasks = None):
+    """OTP resend disabled - returns message indicating no OTP needed"""
     email = data.get("email")
-    if not email: raise HTTPException(400, "Email is required")
-    async with async_session() as s:
-        result = await s.execute(select(User).where(User.email == email))
-        user = result.scalar_one_or_none()
-        if not user: raise HTTPException(404, "User not found. Please register first.")
-        otp = _otp()
-        expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
-        user.otp = otp; user.otp_expiry = expiry
-        await s.commit()
-        bg.add_task(send_email, email, "Talent Scout - New Verification Code",
-            f"""<h2 style="color:#6366f1;">Hello {user.name}!</h2>
-            <p>Here is your new verification code:</p>
-            <div style="background:linear-gradient(135deg,#6366f1,#8b5cf6);padding:30px;text-align:center;border-radius:12px;margin:20px 0;">
-                <h1 style="color:white;font-size:52px;letter-spacing:10px;margin:0;">{otp}</h1>
-            </div>
-            <p style="color:#666;">Valid for <strong>10 minutes</strong>.</p>""")
-        return {"message": "New OTP sent to email", "email": email}
+    if not email: 
+        raise HTTPException(400, "Email is required")
+    
+    return {
+        "message": "OTP verification is disabled. Please login with your password.", 
+        "email": email,
+        "otp_disabled": True
+    }
 
-# ---- Email Change with OTP (SQLite) ----
+# ---- Email Change (No OTP) ----
 @api_router.post("/auth/request-email-change")
 async def request_email_change(data: dict = Body(...), bg: BackgroundTasks = None):
+    """Request email change - No OTP required"""
     old_email = data.get("old_email")
     new_email = data.get("new_email")
-    if not old_email or not new_email: raise HTTPException(400, "Both emails required")
-    if old_email == new_email: raise HTTPException(400, "New email must be different")
+    if not old_email or not new_email: 
+        raise HTTPException(400, "Both emails required")
+    if old_email == new_email: 
+        raise HTTPException(400, "New email must be different")
+    
     async with async_session() as s:
         result = await s.execute(select(User).where(User.email == old_email))
         user = result.scalar_one_or_none()
-        if not user: raise HTTPException(404, "User not found")
+        if not user: 
+            raise HTTPException(404, "User not found")
+        
         result2 = await s.execute(select(User).where(User.email == new_email))
-        if result2.scalar_one_or_none(): raise HTTPException(400, "Email already registered")
-        otp = _otp()
-        user.otp = otp
-        user.otp_expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        if result2.scalar_one_or_none(): 
+            raise HTTPException(400, "Email already registered")
+        
+        # Update email directly without OTP
+        user.email = new_email
         await s.commit()
-        bg.add_task(send_email, new_email, "Talent Scout - Verify New Email",
-            f"""<h2 style="color:#6366f1;">Verify Email Change</h2>
-            <p>Code: <strong style="font-size:32px;letter-spacing:6px;">{otp}</strong></p>
-            <p>Valid for 10 minutes.</p>""")
-        return {"message": "Verification OTP sent to new email", "new_email": new_email}
+        
+        bg.add_task(send_email, new_email, "Talent Scout - Email Updated",
+            f"""<h2 style="color:#6366f1;">Email Updated</h2>
+            <p>Your email has been successfully changed to {new_email}.</p>""")
+        
+        return {
+            "message": "Email updated successfully", 
+            "new_email": new_email,
+            "token": f"token_{new_email}"
+        }
 
 @api_router.post("/auth/verify-email-change")
 async def verify_email_change(data: dict = Body(...)):
+    """Email change verification - No OTP required, returns success"""
     old_email = data.get("old_email")
     otp = data.get("otp")
-    if not old_email or not otp: raise HTTPException(400, "Email and OTP required")
+    
+    if not old_email: 
+        raise HTTPException(400, "Email required")
+    
     async with async_session() as s:
         result = await s.execute(select(User).where(User.email == old_email))
         user = result.scalar_one_or_none()
-        if not user: raise HTTPException(404, "User not found")
-        if user.otp != otp: raise HTTPException(400, "Invalid OTP")
-        # For SQLite we store pending new email in a simple way
-        return {"message": "Email change verified", "new_email": old_email, "token": f"token_{old_email}"}
+        if not user: 
+            raise HTTPException(404, "User not found")
+        
+        return {
+            "message": "Email change verified", 
+            "new_email": user.email, 
+            "token": f"token_{user.email}"
+        }
 
 @api_router.get("/auth/user/{email}")
 async def get_user(email: str):
@@ -598,7 +646,7 @@ async def get_user(email: str):
         if not user: raise HTTPException(404, "User not found")
         return row_to_dict(user, exclude=['otp', 'otp_expiry'])
 
-# ---- Password Authentication ----
+# ---- Password Management ----
 @api_router.post("/auth/set-password")
 async def set_password(request: SetPasswordRequest):
     """Set or update password for a user"""
@@ -618,80 +666,66 @@ async def set_password(request: SetPasswordRequest):
     
     return {"message": "Password set successfully"}
 
+@api_router.post("/auth/login")
 @api_router.post("/auth/login-password")
 async def login_with_password(request: PasswordLoginRequest):
-    """Login using password instead of OTP"""
+    """Login using password - No OTP verification required"""
     async with async_session() as s:
         result = await s.execute(select(User).where(User.email == request.email))
         user = result.scalar_one_or_none()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        if not user.verified:
-            raise HTTPException(status_code=400, detail="Email not verified. Please use OTP login first.")
-        
+        # Check if user has password set
         if not user.password_hash:
-            raise HTTPException(status_code=400, detail="No password set. Please use OTP login or set a password first.")
+            raise HTTPException(status_code=400, detail="No password set. Please register first.")
         
+        # Verify password
         if not verify_password(request.password, user.password_hash):
             raise HTTPException(status_code=400, detail="Invalid password")
+        
+        # Auto-verify if not already verified (for backward compatibility)
+        if not user.verified:
+            user.verified = True
+            await s.commit()
     
     return {
         "message": "Login successful",
         "token": "token_" + request.email,
         "role": user.role,
         "name": user.name,
-        "email": request.email
+        "email": request.email,
+        "verified": True
     }
 
 @api_router.post("/auth/forgot-password")
 async def forgot_password(request: ForgotPasswordRequest, background_tasks: BackgroundTasks):
-    """Request OTP for password reset"""
+    """Request password reset - No OTP, sends reset link or direct reset"""
     async with async_session() as s:
         result = await s.execute(select(User).where(User.email == request.email))
         user = result.scalar_one_or_none()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        otp = _otp()
-        otp_expiry = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
-        
-        user.password_reset_otp = otp
-        user.password_reset_otp_expiry = otp_expiry
-        user.last_otp_sent = _now()
-        await s.commit()
-        
+        # For no-OTP flow, we'll just allow direct password reset
+        # In production, you might want to send a secure reset link
         name = user.name or "there"
-        background_tasks.add_task(send_email, request.email, "Talent Scout - Password Reset Code",
+        background_tasks.add_task(send_email, request.email, "Talent Scout - Password Reset",
             f"""<h2 style="color: #6366f1;">Hello {name}!</h2>
-            <p>You requested to reset your password. Here's your verification code:</p>
-            <div style="background: linear-gradient(135deg, #6366f1, #8b5cf6); padding: 30px; text-align: center; border-radius: 10px; margin: 20px 0;">
-                <h1 style="color: white; font-size: 48px; letter-spacing: 8px; margin: 0;">{otp}</h1>
-            </div>
-            <p style="color: #666;">This code expires in <strong>10 minutes</strong>.</p>
-            <p style="color: #999; font-size: 12px;">If you did not request this, please ignore this email and your password will remain unchanged.</p>""")
+            <p>You requested to reset your password.</p>
+            <p>Since OTP is disabled, you can set a new password directly from your account settings.</p>
+            <p style="color: #666;">If you did not request this, please ignore this email.</p>""")
     
-    return {"message": "Password reset OTP sent to email"}
+    return {"message": "Password reset instructions sent to email"}
 
 @api_router.post("/auth/reset-password")
 async def reset_password(request: ResetPasswordRequest):
-    """Reset password using OTP"""
+    """Reset password - No OTP required"""
     async with async_session() as s:
         result = await s.execute(select(User).where(User.email == request.email))
         user = result.scalar_one_or_none()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
-        if not user.password_reset_otp:
-            raise HTTPException(status_code=400, detail="Please request a password reset first")
-        
-        if user.password_reset_otp != request.otp:
-            raise HTTPException(status_code=400, detail="Invalid OTP")
-        
-        if user.password_reset_otp_expiry:
-            otp_expiry = datetime.fromisoformat(user.password_reset_otp_expiry)
-            if datetime.now(timezone.utc) > otp_expiry:
-                raise HTTPException(status_code=400, detail="OTP expired. Please request a new one.")
         
         if len(request.new_password) < 6:
             raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
@@ -701,6 +735,7 @@ async def reset_password(request: ResetPasswordRequest):
         user.password_reset_otp = None
         user.password_reset_otp_expiry = None
         user.password_set_at = _now()
+        user.verified = True
         await s.commit()
     
     return {"message": "Password reset successfully"}
@@ -715,6 +750,66 @@ async def check_password_set(email: str):
             raise HTTPException(status_code=404, detail="User not found")
     
     return {"has_password": bool(user.password_hash)}
+
+@api_router.delete("/auth/account/{email}")
+async def delete_account(email: str):
+    """Permanently delete user account and all associated data"""
+    async with async_session() as s:
+        # Get user
+        result = await s.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Delete candidate profile if exists
+        await s.execute(select(CandidateProfile).where(CandidateProfile.email == email))
+        result = await s.execute(select(CandidateProfile).where(CandidateProfile.email == email))
+        candidate_profile = result.scalar_one_or_none()
+        if candidate_profile:
+            await s.delete(candidate_profile)
+        
+        # Delete recruiter profile if exists
+        result = await s.execute(select(RecruiterProfile).where(RecruiterProfile.email == email))
+        recruiter_profile = result.scalar_one_or_none()
+        if recruiter_profile:
+            await s.delete(recruiter_profile)
+        
+        # Delete wallet items and their files
+        result = await s.execute(select(WalletItem).where(WalletItem.user_email == email))
+        wallet_items = result.scalars().all()
+        for item in wallet_items:
+            # Delete file from disk
+            try:
+                fp = Path(item.file_path)
+                if fp.exists():
+                    fp.unlink()
+            except Exception:
+                pass  # Continue even if file deletion fails
+            await s.delete(item)
+        
+        # Delete jobs posted by this user (if recruiter)
+        result = await s.execute(select(Job).where(Job.recruiter_email == email))
+        jobs = result.scalars().all()
+        for job in jobs:
+            await s.delete(job)
+        
+        # Delete notifications
+        result = await s.execute(select(Notification).where(Notification.user_email == email))
+        notifications = result.scalars().all()
+        for notification in notifications:
+            await s.delete(notification)
+        
+        # Delete blockchain records
+        result = await s.execute(select(BlockchainRecord).where(BlockchainRecord.candidate_email == email))
+        blockchain_records = result.scalars().all()
+        for record in blockchain_records:
+            await s.delete(record)
+        
+        # Finally delete the user
+        await s.delete(user)
+        await s.commit()
+    
+    return {"message": "Account and all associated data permanently deleted"}
 
 # ---- AI Confirm Skills ----
 @api_router.post("/ai/confirm-skills/{email}")
@@ -1586,6 +1681,47 @@ async def get_recruiter_jobs(email: str):
     async with async_session() as s:
         result = await s.execute(select(Job).where(Job.recruiter_email == email).order_by(Job.created_at.desc()))
         return [row_to_dict(j) for j in result.scalars().all()]
+
+@api_router.put("/recruiter/job/{job_id}")
+async def update_job(job_id: str, job_update: JobPosting):
+    async with async_session() as s:
+        result = await s.execute(select(Job).where(Job.job_id == job_id))
+        job = result.scalar_one_or_none()
+        if not job:
+            raise HTTPException(404, "Job not found")
+        # Verify the recruiter owns this job
+        if job.recruiter_email != job_update.recruiter_email:
+            raise HTTPException(403, "Not authorized to edit this job")
+        
+        # Update fields
+        job.title = job_update.title
+        job.description = job_update.description
+        job.required_skills = json.dumps(job_update.required_skills)
+        job.talent_category = job_update.talent_category
+        if job_update.company_name:
+            job.company_name = job_update.company_name
+        if job_update.location:
+            job.location = job_update.location
+        if job_update.salary_range:
+            job.salary_range = job_update.salary_range
+        
+        await s.commit()
+        return {"message": "Job updated successfully", "job_id": job_id}
+
+@api_router.delete("/recruiter/job/{job_id}")
+async def delete_job(job_id: str, email: str):
+    async with async_session() as s:
+        result = await s.execute(select(Job).where(Job.job_id == job_id))
+        job = result.scalar_one_or_none()
+        if not job:
+            raise HTTPException(404, "Job not found")
+        # Verify the recruiter owns this job
+        if job.recruiter_email != email:
+            raise HTTPException(403, "Not authorized to delete this job")
+        
+        await s.delete(job)
+        await s.commit()
+        return {"message": "Job deleted successfully", "job_id": job_id}
 
 @api_router.get("/recruiter/candidates")
 async def search_candidates(talent_category: Optional[str] = None, skills: Optional[str] = None, min_score: Optional[float] = 0):
